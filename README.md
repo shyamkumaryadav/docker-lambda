@@ -26,7 +26,7 @@ Runtimes images:
 - Python (based on `public.ecr.aws/lambda/python:{version}`)
   - **ghcr.io/lambgeo/lambda-gdal:3.8-python3.9**
   - **ghcr.io/lambgeo/lambda-gdal:3.8-python3.10**
-  - **ghcr.io/lambgeo/lambda-gdal:3.8-python3.11**
+  - **ghcr.io/lambgeo/lambda-gdal:3.8-python3.13**
 
 **archived**
   - **ghcr.io/lambgeo/lambda-gdal:3.6**
