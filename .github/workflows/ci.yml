@@ -1,182 +1,62 @@
 name: CI
 
 on:
-  push:
-    paths:
-    - 'dockerfiles/**'
-    - 'scripts/deploy.py'
-    - 'scripts/create-layer.sh'
-    - 'tests/*'
-    - '.github/workflows/ci.yml'
-    branches:
-    - master
-    tags:
-    - '*'
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      gdal_version:
+        description: "GDAL version to build"
+        required: true
+        default: "3.8.3"
+      python_version:
+        description: "Python version to target"
+        required: true
+        default: "3.11"
 
 env:
-  GDAL_VERSION: 3.8.3
-  GDAL_VERSION_TAG: 3.8
+  GDAL_VERSION: ${{ github.event.inputs.gdal_version }}
+  GDAL_VERSION_TAG: ${{ github.event.inputs.gdal_version }}
+  PYTHON_VERSION: ${{ github.event.inputs.python_version }}
 
 jobs:
-  build:
+  build-layer:
     runs-on: ubuntu-latest
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install boto3 click
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Github
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build
+      - name: Build Docker image with GDAL
         uses: docker/build-push-action@v6
         with:
           platforms: linux/amd64
           context: .
+          file: dockerfiles/Dockerfile
           load: true
-          file: dockerfiles/Dockerfile
           build-args: |
             GDAL_VERSION=${{ env.GDAL_VERSION }}
-          tags: ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: lambda-gdal:${{ env.GDAL_VERSION }}
 
-      - name: Test
+      - name: Run container to create GDAL Lambda Layer
         run: |
           docker run \
             --platform=linux/amd64 \
-            --entrypoint bash \
+            --rm \
             -v ${{ github.workspace }}:/local \
-            --rm ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }} \
-            /local/tests/tests.sh
-
-  deploy:
-    needs: [build]
-    runs-on: ubuntu-latest
-    if: contains(github.ref, 'tags') && github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Github
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Publish docker image
-        uses: docker/build-push-action@v6
-        with:
-          platforms: linux/amd64
-          context: .
-          file: dockerfiles/Dockerfile
-          build-args: |
-            GDAL_VERSION=${{ env.GDAL_VERSION }}
-          push: true
-          cache-from: type=gha
-          tags: ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}
-
-      - name: Build and Deploy layers
-        run: |
-          python -m pip install boto3 click
-          docker run \
-            --platform=linux/amd64 \
-            --entrypoint bash \
-            -v ${{ github.workspace }}:/local \
-            --rm ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }} \
+            lambda-gdal:${{ env.GDAL_VERSION }} \
             /local/scripts/create-layer.sh
-          python scripts/deploy.py ${{ env.GDAL_VERSION_TAG }} --deploy
+          echo "Layer zip created"
 
-      - name: Build Runtime and Push Python <=3.11 with yum
-        run: |
-          runtimes='3.9 3.10 3.11'
-          for runtime in ${runtimes}; do
-            docker build \
-              --platform=linux/amd64 \
-              --build-arg GDAL_VERSION_TAG=${{ env.GDAL_VERSION_TAG }} \
-              --build-arg RUNTIME_VERSION=${runtime} \
-              --build-arg NUMPY_VERSION=1.25 \
-              --build-arg PKG_INSTALLER=yum \
-              -f dockerfiles/runtimes/python \
-              -t ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}-python${runtime} .
-            docker push ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}-python${runtime}
-          done
-
-      - name: Build Runtime and Push Python >= 3.12 with dnf
-        run: |
-          runtimes='3.12 3.13'
-          for runtime in ${runtimes}; do
-            docker build \
-              --platform=linux/amd64 \
-              --build-arg GDAL_VERSION_TAG=${{ env.GDAL_VERSION_TAG }} \
-              --build-arg RUNTIME_VERSION=${runtime} \
-              --build-arg NUMPY_VERSION=1.26 \
-              --build-arg PKG_INSTALLER=dnf \
-              -f dockerfiles/runtimes/python \
-              -t ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}-python${runtime} .
-            docker push ghcr.io/${{ github.repository_owner }}/lambda-gdal:${{ env.GDAL_VERSION_TAG }}-python${runtime}
-          done
-
-  update-layer:
-    needs: [deploy]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Upload GDAL Layer artifact
+        uses: actions/upload-artifact@v4
         with:
-          python-version: '3.10'
+          name: gdal-layer-${{ env.GDAL_VERSION }}-python${{ env.PYTHON_VERSION }}
+          path: layer.zip
+          if-no-files-found: error
 
-      - uses: actions/setup-node@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: List layers
+      - name: Add download link to summary
         run: |
-          python -m pip install boto3
-          python scripts/list.py | jq > layer.json
-
-      - name: Update resources
-        uses: test-room-7/action-update-file@v2.0.0
-        with:
-            file-path: layer.json
-            commit-msg: Update layer [skip ci]
-            github-token: ${{ secrets.GITHUB_TOKEN }}
+          echo "### ✅ GDAL Layer Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- GDAL version: **${{ env.GDAL_VERSION }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- Python version: **${{ env.PYTHON_VERSION }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- [⬇️ Download Layer Zip](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
